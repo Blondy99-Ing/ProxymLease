@@ -1,59 +1,61 @@
-// === Collecte des blocs visibles (par date) ===
-(function(){
+
+(function () {
   const $  = (s,c=document)=>c.querySelector(s);
   const $$ = (s,c=document)=>Array.from(c.querySelectorAll(s));
 
-  function getVisibleBlocks(){
-    const blocks = [];
-    document.querySelectorAll('.date-section').forEach(sec=>{
+  // --- Collecte "flat" : 1 seul dataset, avec une colonne Date en 1ère colonne
+  function collectVisibleFlat() {
+    const rows = [];
+    let headers = null;
+
+    $$('.date-section').forEach(sec => {
       const dateLabel = (sec.textContent || '').trim();
       const tableWrap = sec.nextElementSibling; // .table-container
       const table = tableWrap ? tableWrap.querySelector('table.table') : null;
       if (!table) return;
 
-      const headers = Array.from(table.querySelectorAll('thead th')).map(th=>th.textContent.trim());
-      const rows = [];
-      table.querySelectorAll('tbody tr').forEach(tr=>{
+      const localHeaders = Array.from(table.querySelectorAll('thead th')).map(th => th.textContent.trim());
+
+      // On fige les en-têtes une seule fois, et on préfixe par "Date"
+      if (!headers) headers = ['Date', ...localHeaders];
+
+      table.querySelectorAll('tbody tr').forEach(tr => {
         if (tr.style.display === 'none') return; // respecte filtres
         const cols = Array.from(tr.querySelectorAll('td')).map(td =>
-          td.textContent.replace(/\s+\n\s+/g,' ').trim()
+          td.textContent.replace(/\s+\n\s+/g, ' ').trim()
         );
-        rows.push(cols);
+        rows.push([dateLabel, ...cols]);
       });
-      blocks.push({ date: dateLabel, headers, rows });
     });
-    return blocks;
+
+    return { headers: headers || [], rows };
   }
 
-  // === EXCEL (HTML .xls) ===
-  function exportExcelHTML(filename){
-    const blocks = getVisibleBlocks();
+  // --- EXCEL (HTML .xls) : 1 seul tableau, prêt à retraiter
+  function exportExcelHTML(filename = 'leases') {
+    const { headers, rows } = collectVisibleFlat();
 
-    function escapeHtml(s){
+    function escapeHtml(s) {
       return String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
     }
 
-    const sections = blocks.map(b=>{
-      if (!b.rows.length) return '';
-      const thead = `<thead><tr>${b.headers.map(h=>`<th>${escapeHtml(h)}</th>`).join('')}</tr></thead>`;
-      const tbody = `<tbody>${
-        b.rows.map(r=>`<tr>${r.map(c=>`<td>${escapeHtml(c)}</td>`).join('')}</tr>`).join('')
-      }</tbody>`;
-      return `
-        <h3 style="margin:16px 0 6px;font-size:14px;">Date : ${escapeHtml(b.date)}</h3>
-        <table border="1" cellspacing="0" cellpadding="4">${thead}${tbody}</table>
-      `;
-    }).join('') || '<div>Aucune ligne visible à exporter.</div>';
+    const thead = `<thead><tr>${headers.map(h=>`<th>${escapeHtml(h)}</th>`).join('')}</tr></thead>`;
+    const tbody = `<tbody>${
+      rows.map(r=>`<tr>${r.map(c=>`<td>${escapeHtml(c)}</td>`).join('')}</tr>`).join('')
+    }</tbody>`;
 
     const html = `<!DOCTYPE html>
 <html><head><meta charset="utf-8" />
-<title>Leases</title>
+<title>Leases export</title>
 <style>
   body{font-family:Arial,sans-serif}
-  table{border-collapse:collapse;margin-bottom:12px}
-  th,td{font-size:12px}
+  table{border-collapse:collapse;width:100%}
+  th,td{border:1px solid #ccc;padding:6px 8px;font-size:12px}
   th{background:#f2f2f2}
-</style></head><body>${sections}</body></html>`;
+  caption{font-weight:bold;margin-bottom:8px}
+</style></head><body>
+  <table>${thead}${tbody}</table>
+</body></html>`;
 
     const blob = new Blob([html], { type: 'application/vnd.ms-excel;charset=utf-8;' });
     const url  = URL.createObjectURL(blob);
@@ -66,28 +68,22 @@
     URL.revokeObjectURL(url);
   }
 
-  // === CSV (avec BOM UTF-8, séparateur ; pour Excel FR) ===
-  function exportCSV(filename){
-    const blocks = getVisibleBlocks();
+  // --- CSV (BOM + ; comme séparateur) : 1 seul tableau
+  function exportCSV(filename = 'leases') {
+    const { headers, rows } = collectVisibleFlat();
     const sep = ';';
 
-    function csvEscape(val){
+    function csvEscape(val) {
       const s = (val ?? '').toString().replace(/"/g,'""');
       return `"${s}"`;
     }
 
     const lines = [];
-    blocks.forEach(b=>{
-      if (!b.rows.length) return;
-      // sous-titre de date (ligne vide + "Date: …")
-      lines.push(`"Date"${sep}${csvEscape(b.date)}`);
-      lines.push(b.headers.map(csvEscape).join(sep));
-      b.rows.forEach(r => lines.push(r.map(csvEscape).join(sep)));
-      lines.push(''); // espace entre sections
-    });
+    if (headers.length) lines.push(headers.map(csvEscape).join(sep));
+    rows.forEach(r => lines.push(r.map(csvEscape).join(sep)));
 
     const csv = lines.join('\r\n');
-    const BOM = '\uFEFF'; // UTF-8 BOM pour accents dans Excel
+    const BOM = '\uFEFF';
     const blob = new Blob([BOM + csv], { type: 'text/csv;charset=utf-8;' });
 
     const url = URL.createObjectURL(blob);
@@ -100,37 +96,43 @@
     URL.revokeObjectURL(url);
   }
 
-  // === PDF (impression navigateur) ===
-  function exportPDF(){
-    // On ouvre une fenêtre avec uniquement les sections & tables visibles
-    const blocks = getVisibleBlocks();
+  // --- PDF (fenêtre d’impression) : 1 seul tableau, un titre, la période
+  function exportPDF() {
+    const { headers, rows } = collectVisibleFlat();
+
+    // petit garde-fou
+    const hasData = headers.length && rows.length;
+
+    const title = 'Export Leases';
+    const period = `{{ $label ?? \Illuminate\Support\Carbon::parse($date ?? now())->format('d/m/Y') }}`;
+
+    const tableHead = headers.map(h=>`<th>${h}</th>`).join('');
+    const tableBody = rows.map(r => `<tr>${r.map(c=>`<td>${c}</td>`).join('')}</tr>`).join('');
 
     const html = `<!DOCTYPE html>
 <html><head><meta charset="utf-8">
-<title>Leases</title>
+<title>${title}</title>
 <style>
-  body{font-family:Arial,sans-serif;margin:20px}
-  h2{margin:0 0 6px 0}
-  h3{margin:16px 0 6px 0}
-  table{width:100%;border-collapse:collapse;margin-bottom:14px}
-  th,td{border:1px solid #ccc;padding:6px 8px;font-size:12px}
+  @media print {
+    @page { size: A4 landscape; margin: 12mm; }
+  }
+  body{font-family:Arial,sans-serif;margin:16px 18px}
+  h1{margin:0 0 2px 0;font-size:18px}
+  .meta{margin:0 0 12px 0;color:#555;font-size:12px}
+  table{width:100%;border-collapse:collapse}
+  th,td{border:1px solid #bbb;padding:6px 7px;font-size:11.5px;vertical-align:top}
   th{background:#f5f5f5}
-  .meta{margin-bottom:10px;color:#666;font-size:12px}
+  .empty{color:#666;font-style:italic;margin-top:8px}
 </style></head><body>
-  <h2>Export Leases</h2>
-  <div class="meta">{{ $label ?? \Illuminate\Support\Carbon::parse($date ?? now())->format('d/m/Y') }}</div>
+  <h1>${title}</h1>
+  <div class="meta">Période : ${period}</div>
   ${
-    blocks.map(b=>{
-      if (!b.rows.length) return '';
-      return `
-        <h3>Date : ${b.date}</h3>
-        <table>
-          <thead><tr>${b.headers.map(h=>`<th>${h}</th>`).join('')}</tr></thead>
-          <tbody>${
-            b.rows.map(r=>`<tr>${r.map(c=>`<td>${c}</td>`).join('')}</tr>`).join('')
-          }</tbody>
-        </table>`;
-    }).join('') || '<div>Aucune ligne visible à exporter.</div>'
+    hasData
+      ? `<table>
+           <thead><tr>${tableHead}</tr></thead>
+           <tbody>${tableBody}</tbody>
+         </table>`
+      : `<div class="empty">Aucune ligne visible à exporter.</div>`
   }
 </body></html>`;
 
@@ -140,21 +142,17 @@
     w.document.write(html);
     w.document.close();
     w.focus();
-    // petit délai pour laisser le rendu se faire
     setTimeout(()=>{ w.print(); }, 250);
   }
 
-  // === Branche les boutons ===
-  const btnExcel = document.querySelector('.export-btn.export-excel');
-  const btnCSV   = document.querySelector('.export-btn.export-csv');
-  const btnPDF   = document.querySelector('.export-btn.export-pdf');
+  // Branchements
+  $('.export-btn.export-excel')?.addEventListener('click', ()=> exportExcelHTML('leases'));
+  $('.export-btn.export-csv')  ?.addEventListener('click', ()=> exportCSV('leases'));
+  $('.export-btn.export-pdf')  ?.addEventListener('click',  exportPDF);
 
-  btnExcel && btnExcel.addEventListener('click', ()=> exportExcelHTML('leases'));
-  btnCSV   && btnCSV.addEventListener('click',   ()=> exportCSV('leases'));
-  btnPDF   && btnPDF.addEventListener('click',   exportPDF);
-
-  // Expose si tu veux réutiliser ailleurs
+  // Expose (si besoin ailleurs)
   window.exportExcelHTML = exportExcelHTML;
-  window.exportCSV = exportCSV;
-  window.exportPDF = exportPDF;
+  window.exportCSV       = exportCSV;
+  window.exportPDF       = exportPDF;
 })();
+

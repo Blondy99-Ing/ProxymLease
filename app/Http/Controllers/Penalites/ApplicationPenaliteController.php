@@ -7,9 +7,11 @@ use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Carbon;
+
 use App\Models\ContratChauffeur;
 use App\Models\PaiementLease;
 use App\Models\ApplicationPenalite; // table: payments_penalite
+use App\Models\AssociationUserMoto; // 👈 NEW
 use Throwable;
 
 class ApplicationPenaliteController extends Controller
@@ -56,7 +58,7 @@ class ApplicationPenaliteController extends Controller
                         'execution_time'        => $now->toDateTimeString(),
                     ];
 
-                    // Sanity: si jamais la date concernée est manquante
+                    // date concernée manquante -> on ignore
                     if (empty($contrat->date_paiement_concerne)) {
                         $report['counters']['skipped_nodate']++;
                         $report['details'][] = array_merge($context, [
@@ -67,7 +69,7 @@ class ApplicationPenaliteController extends Controller
                         continue;
                     }
 
-                    // Ne pas créer de pénalité avant midi (même si on est le jour limite)
+                    // Avant midi -> pas de pénalité
                     [$montant, $type] = $this->calculPenaliteParHeure($now);
                     if ($montant === 0) {
                         $report['counters']['skipped_noon']++;
@@ -125,17 +127,25 @@ class ApplicationPenaliteController extends Controller
                                     'description'          => 'Pénalité auto selon heure de dépassement',
                                 ]);
 
+                                // 👇 NEW: bloquer le swap de l’association liée au contrat
+                                if (!empty($contrat->association_id)) {
+                                    AssociationUserMoto::whereKey($contrat->association_id)
+                                        ->update(['swap_bloque' => 1]); // bool/int OK
+                                }
+
                                 $report['counters']['applied']++;
                                 $report['details'][] = array_merge($context, [
                                     'status'  => 'APPLIED',
                                     'reason'  => 'Pénalité créée',
                                     'palier'  => $type,
                                     'amount'  => $montant,
+                                    'swap_bloque' => true, // 👈 NEW (info rapport)
                                 ]);
-                                Log::info('[PENALITES] Pénalité créée.', array_merge($context, [
+                                Log::info('[PENALITES] Pénalité créée + swap bloqué.', array_merge($context, [
                                     'date_manquee' => $dateConcerne,
                                     'type'         => $type,
                                     'montant'      => $montant,
+                                    'assoc_id'     => $contrat->association_id,
                                 ]));
                             } else {
                                 // Mettre à niveau si nouveau palier supérieur
@@ -147,18 +157,26 @@ class ApplicationPenaliteController extends Controller
                                         'date_modification' => $now,
                                     ]);
 
+                                    // 👇 NEW: bloquer aussi lors d’un upgrade
+                                    if (!empty($contrat->association_id)) {
+                                        AssociationUserMoto::whereKey($contrat->association_id)
+                                            ->update(['swap_bloque' => 1]);
+                                    }
+
                                     $report['counters']['upgraded']++;
                                     $report['details'][] = array_merge($context, [
                                         'status'   => 'UPGRADED',
                                         'reason'   => "Palier augmenté ($old → $montant)",
                                         'palier'   => $type,
                                         'amount'   => $montant,
+                                        'swap_bloque' => true, // 👈 NEW (info rapport)
                                     ]);
-                                    Log::info('[PENALITES] Pénalité mise à niveau.', array_merge($context, [
+                                    Log::info('[PENALITES] Pénalité mise à niveau + swap bloqué.', array_merge($context, [
                                         'date_manquee' => $dateConcerne,
                                         'old_montant'  => $old,
                                         'new_montant'  => $montant,
                                         'type'         => $type,
+                                        'assoc_id'     => $contrat->association_id,
                                     ]));
                                 } else {
                                     $report['counters']['skipped_exists']++;
@@ -192,19 +210,31 @@ class ApplicationPenaliteController extends Controller
             'summary' => $report['counters'],
         ]);
 
-        // Renvoi un rapport JSON exploitable (utile pour un cron manuel / debug)
         return response()->json($report);
     }
 
-    private function calculPenaliteParHeure(Carbon $now): array
-    {
-        $hhmm = $now->format('H:i');
-        if ($hhmm < '12:00') {
-            return [0, 'AUCUNE'];
-        }
-        if ($hhmm <= '14:00') {
-            return [2000, 'RETARD_LEGER'];
-        }
-        return [5000, 'RETARD_GRAVE'];
-    }
+   // private function calculPenaliteParHeure(Carbon $now): array
+   // {
+   //     $hhmm = $now->format('H:i');
+   //     if ($hhmm < '12:00') {
+   //         return [0, 'AUCUNE'];
+   //     }
+   //     if ($hhmm <= '14:00') {
+   //         return [2000, 'RETARD_LEGER'];
+   //     }
+   //     return [5000, 'RETARD_GRAVE'];
+   // }
+
+
+private function calculPenaliteParHeure(Carbon $now): array
+{
+    // ⚠️ TEST UNIQUEMENT
+    // Toujours appliquer RETARD_LEGER peu importe l'heure
+    return [2000, 'RETARD_LEGER'];
+
+    // ou forcer le palier grave
+    // return [5000, 'RETARD_GRAVE'];
+}
+
+
 }
